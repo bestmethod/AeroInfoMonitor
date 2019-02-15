@@ -1,5 +1,7 @@
 # AeroInfoMonitor
 
+## v2, added multi-threading for timeout handling
+
 Depending on whether you want to run this on linux, windows or Apple OSX, grab the correct executable binary from one of the directories (linux/, windows/, osx/).
 
 All source code for inspection is in main.go
