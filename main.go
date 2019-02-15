@@ -30,59 +30,89 @@ func (m *mainStruct) main() {
 
 // the main loop which never ends - the actual monitoring loop
 func (m *mainStruct) mainLoop() {
+
+	// lets do a limit of threads, 1k should be more than enough, it means 20 per second per downed server
+	max_goroutines := 1000
+	goroutines := make(chan int, max_goroutines)
+
+	// to infinity, and beyond
 	for {
 		m.connect()                  // will only connect if not yet connected, logic is there
 		nodes := m.client.GetNodes() // get a list of nodes
 
 		// execute for each node
-		for _, node := range nodes {
+		for _, nnode := range nodes {
 
-			// we will need them later, cluster size, tx pending and rx pending
-			// yes, we want to declare them this way, because if something wrong goes on, we should still have them and print what we got
-			cs := ""
-			tx := ""
-			rx := ""
-
-			// some basic stuff we can log, because we can
-			nodeName := node.GetName()
-			nodeHost := node.GetHost().String()
-			nodeActive := node.IsActive()
-
-			// lets issue actual Info()
-			info, err := node.RequestInfo(fmt.Sprintf("namespace/%s", m.ns))
-			if err != nil {
-				// wops, log that Info() failed, reason and anything else we gathered
-				logger.Error("InfoGetError,node=%s,host=%s,nodeActive=%t,clientNodesConnected=%d,err=%s", nodeName, nodeHost, nodeActive, len(nodes), err)
-			} else {
-
-				// now some play with strings, separate results
-				ndts := strings.Split(info[fmt.Sprintf("namespace/%s",m.ns)], ";")
-
-				// go through each separate result and find the 3 we care about (cs, tx, rx)
-				// if we found all 3 already, break out of this loop, no point wasting precious milliseconds
-				found := 0
-				for _, ndt := range ndts {
-					if strings.HasPrefix(ndt, "ns_cluster_size=") {
-						cs = ndt
-						found = found + 1
-					} else if strings.HasPrefix(ndt, "migrate_tx_partitions_remaining=") {
-						tx = ndt
-						found = found + 1
-					} else if strings.HasPrefix(ndt, "migrate_rx_partitions_remaining=") {
-						rx = ndt
-						found = found + 1
-					}
-					if found == 3 {
-						break
-					}
-				}
-
-				// lets log success and all the data we got
-				logger.Info("InfoGetSuccess,node=%s,host=%s,nodeActive=%t,clientNodesConnected=%d,%s,%s,%s", nodeName, nodeHost, nodeActive, len(nodes), cs, tx, rx)
+			// useful to know
+			if len(goroutines) == max_goroutines {
+				logger.Warn("Something is hanging, we have %d threads running. Going to wait for an available thread before continuing.",max_goroutines)
 			}
+
+			// this chan stuff is cool, basically, if we try to put more in than we can, it will just hang there and wait, auto-throttling
+			goroutines <- 1
+
+			// wrap around in a goroutine to run async - in case one node needs a timeout as it hangs
+			go func(node *as.Node, nodesCount int, goroutines chan int) {
+
+				// lets handle panics
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Critical("Recovered in f: %s", r)
+					}
+				}()
+
+				// we want the routine to note it exited once it is done, so the main thread know - for throttling, you see
+				defer func(goroutines chan int) {
+					<-goroutines
+				}(goroutines)
+
+				// we will need them later, cluster size, tx pending and rx pending
+				// yes, we want to declare them this way, because if something wrong goes on, we should still have them and print what we got
+				cs := ""
+				tx := ""
+				rx := ""
+
+				// some basic stuff we can log, because we can
+				nodeName := node.GetName()
+				nodeHost := node.GetHost().String()
+				nodeActive := node.IsActive()
+
+				// lets issue actual Info()
+				info, err := node.RequestInfo(fmt.Sprintf("namespace/%s", m.ns))
+				if err != nil {
+					// wops, log that Info() failed, reason and anything else we gathered
+					logger.Error("InfoGetError,node=%s,host=%s,nodeActive=%t,clientNodesConnected=%d,err=%s,ThreadCount=%d", nodeName, nodeHost, nodeActive, len(nodes), err, len(goroutines))
+				} else {
+
+					// now some play with strings, separate results
+					ndts := strings.Split(info[fmt.Sprintf("namespace/%s", m.ns)], ";")
+
+					// go through each separate result and find the 3 we care about (cs, tx, rx)
+					// if we found all 3 already, break out of this loop, no point wasting precious milliseconds
+					found := 0
+					for _, ndt := range ndts {
+						if strings.HasPrefix(ndt, "ns_cluster_size=") {
+							cs = ndt
+							found = found + 1
+						} else if strings.HasPrefix(ndt, "migrate_tx_partitions_remaining=") {
+							tx = ndt
+							found = found + 1
+						} else if strings.HasPrefix(ndt, "migrate_rx_partitions_remaining=") {
+							rx = ndt
+							found = found + 1
+						}
+						if found == 3 {
+							break
+						}
+					}
+
+					// lets log success and all the data we got
+					logger.Info("InfoGetSuccess,node=%s,host=%s,nodeActive=%t,clientNodesConnected=%d,%s,%s,%s,ThreadCount=%d", nodeName, nodeHost, nodeActive, len(nodes), cs, tx, rx, len(goroutines))
+				}
+			}(nnode, len(nodes), goroutines)
 		}
 
-		// short snooze ;)
+		// short snooze before the loop ;)
 		time.Sleep(50 * time.Millisecond)
 	}
 }
